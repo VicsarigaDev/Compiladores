@@ -5,7 +5,6 @@ FLEX   = flex
 BISON  = bison
 
 TARGET = compiler
-SRCS   = parser.tab.c lex.yy.c
 
 all: $(TARGET)
 
@@ -19,10 +18,10 @@ lex.yy.c: scanner.l parser.tab.h
 	$(FLEX) scanner.l
 
 test-correct: $(TARGET)
-	./$(TARGET) test_correct.txt
+	./$(TARGET) correcto.c
 
 test-incorrect: $(TARGET)
-	./$(TARGET) test_incorrect.txt
+	./$(TARGET) errores.c
 
 clean:
 	rm -f parser.tab.c parser.tab.h parser.output lex.yy.c $(TARGET)

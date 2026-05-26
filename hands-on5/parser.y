@@ -1,15 +1,15 @@
 %{
 /*
  * parser.y — Analizador sintáctico y semántico (Bison)
- * hands-on5: Extensión del compilador
+ * hands-on5: Práctica integradora — Extensión del compilador con Flex y Bison
  *
- * Mejoras sintácticas implementadas:
+ * Mejoras sintácticas (§6):
  *   6.1 Expresiones aritméticas simples
- *   6.2 Sentencia if simple
- *   6.3 Mejores mensajes de error sintáctico
+ *   6.2 Sentencia if simple con bloque {}
+ *   6.3 Mejores mensajes de error con número de línea y recuperación
  *
- * Mejoras semánticas implementadas:
- *   7.1 Imprimir tabla de símbolos final
+ * Mejoras semánticas (§7):
+ *   7.1 Imprimir tabla de símbolos al final
  *   7.2 Detectar variables declaradas pero no usadas
  *   7.3 Verificar variables usadas en condiciones if
  */
@@ -18,109 +18,191 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern int line_count;
-extern int yylex();
+extern int   line_count;
+extern int   yylex(void);
 extern FILE *yyin;
 
 void yyerror(const char *msg);
 
-/* -------- Tabla de símbolos -------- */
-#define MAX_SYMBOLS 256
+/* ============================================================
+ * Tabla de macros (#define)
+ * ============================================================ */
+typedef struct { char name[64]; int value; } Macro;
+static Macro macros[128];
+static int   macro_n = 0;
 
-typedef struct {
-    char name[64];
-    char type[16];
-    int  used;      /* 0 = no usada, 1 = usada */
-} Symbol;
-
-static Symbol sym_table[MAX_SYMBOLS];
-static int    sym_count = 0;
-
-static void sym_add(const char *name, const char *type) {
+static void macro_add(const char *name, int value) {
     int i;
-    for (i = 0; i < sym_count; i++) {
-        if (strcmp(sym_table[i].name, name) == 0) {
-            fprintf(stderr,
-                "Error semántico (línea %d): variable '%s' ya fue declarada\n",
-                line_count, name);
+    for (i = 0; i < macro_n; i++) {
+        if (strcmp(macros[i].name, name) == 0) {
+            fprintf(stderr, "Error semántico: macro '%s' ya definida\n", name);
             return;
         }
     }
-    if (sym_count >= MAX_SYMBOLS) {
-        fprintf(stderr, "Error interno: tabla de símbolos llena\n");
-        return;
-    }
-    strncpy(sym_table[sym_count].name, name, 63);
-    strncpy(sym_table[sym_count].type, type, 15);
-    sym_table[sym_count].used = 0;
-    sym_count++;
+    strncpy(macros[macro_n].name, name, 63);
+    macros[macro_n].value = value;
+    macro_n++;
 }
 
+/* ============================================================
+ * Tabla de funciones
+ * ============================================================ */
+typedef struct { char name[64]; int param_count; } FuncEntry;
+static FuncEntry funcs[64];
+static int       func_n = 0;
+
+static int func_lookup(const char *name) {
+    int i;
+    for (i = 0; i < func_n; i++)
+        if (strcmp(funcs[i].name, name) == 0) return i;
+    return -1;
+}
+
+static void func_add(const char *name, int param_count) {
+    strncpy(funcs[func_n].name, name, 63);
+    funcs[func_n].param_count = param_count;
+    func_n++;
+}
+
+/* ============================================================
+ * Tabla de símbolos (variables con ámbitos)
+ * ============================================================ */
+typedef struct {
+    char name[64];
+    char type[16];
+    int  scope;
+    int  used;
+    int  is_param;   /* los parámetros no generan advertencia de no-uso */
+} Symbol;
+
+static Symbol syms[512];
+static int    sym_n     = 0;
+static int    cur_scope = 0;
+
+/* Busca en todos los ámbitos visibles (del más interno al más externo) */
 static int sym_lookup(const char *name) {
     int i;
-    for (i = 0; i < sym_count; i++)
-        if (strcmp(sym_table[i].name, name) == 0) return i;
+    for (i = sym_n - 1; i >= 0; i--)
+        if (strcmp(syms[i].name, name) == 0) return i;
     return -1;
+}
+
+/* Busca SOLO en el ámbito actual (para detectar redeclaraciones) */
+static int sym_in_scope(const char *name, int scope) {
+    int i;
+    for (i = 0; i < sym_n; i++)
+        if (syms[i].scope == scope && strcmp(syms[i].name, name) == 0) return i;
+    return -1;
+}
+
+static void sym_add(const char *name, const char *type, int is_param) {
+    if (sym_in_scope(name, cur_scope) >= 0) {
+        fprintf(stderr, "Error semántico: redeclaración de variable '%s'\n", name);
+        return;
+    }
+    strncpy(syms[sym_n].name,  name, 63);
+    strncpy(syms[sym_n].type,  type, 15);
+    syms[sym_n].scope    = cur_scope;
+    syms[sym_n].used     = 0;
+    syms[sym_n].is_param = is_param;
+    sym_n++;
 }
 
 static void sym_mark_used(const char *name) {
     int idx = sym_lookup(name);
-    if (idx >= 0) sym_table[idx].used = 1;
+    if (idx >= 0) syms[idx].used = 1;
 }
 
-/* 7.1 — Imprimir tabla de símbolos */
-static void sym_print(void) {
+/* 7.2 — Salir de ámbito: reportar no-usadas y eliminar */
+static void scope_exit(void) {
+    int i, new_n = 0;
+    /* Advertir variables no usadas (no aplica a parámetros) */
+    for (i = 0; i < sym_n; i++) {
+        if (syms[i].scope == cur_scope && !syms[i].used && !syms[i].is_param)
+            fprintf(stderr,
+                "Advertencia: variable '%s' declarada pero no usada\n",
+                syms[i].name);
+    }
+    /* Eliminar todos los símbolos del ámbito que se cierra */
+    for (i = 0; i < sym_n; i++)
+        if (syms[i].scope != cur_scope)
+            syms[new_n++] = syms[i];
+    sym_n = new_n;
+    cur_scope--;
+}
+
+/* ============================================================
+ * Estado global para análisis semántico
+ * ============================================================ */
+static int arg_count    = 0;  /* args contados en la llamada actual */
+static int in_condition = 0;  /* 7.3: ¿parsing dentro de condición if? */
+
+/* 7.3 — Verifica declaración de variable; emite el mensaje adecuado */
+static void check_var(const char *name) {
+    if (sym_lookup(name) < 0) {
+        if (in_condition)
+            fprintf(stderr,
+                "Error semántico: variable condición '%s' no declarada\n", name);
+        else
+            fprintf(stderr,
+                "Error semántico: variable '%s' no declarada\n", name);
+    } else {
+        sym_mark_used(name);
+    }
+}
+
+/* 7.1 — Imprimir tablas al finalizar */
+static void print_tables(void) {
     int i;
-    printf("\n=== Tabla de Símbolos ===\n");
-    printf("%-20s %-10s %-8s\n", "Nombre", "Tipo", "Usada");
-    printf("%-20s %-10s %-8s\n", "------", "----", "-----");
-    for (i = 0; i < sym_count; i++) {
-        printf("%-20s %-10s %-8s\n",
-               sym_table[i].name,
-               sym_table[i].type,
-               sym_table[i].used ? "Si" : "No");
+    printf("\n=== Tabla de Macros (#define) ===\n");
+    if (macro_n == 0) printf("  (ninguna)\n");
+    else {
+        printf("  %-20s %s\n", "Nombre", "Valor");
+        for (i = 0; i < macro_n; i++)
+            printf("  %-20s %d\n", macros[i].name, macros[i].value);
     }
-    printf("=========================\n");
+    printf("\n=== Tabla de Funciones ===\n");
+    if (func_n == 0) printf("  (ninguna)\n");
+    else {
+        printf("  %-20s %s\n", "Nombre", "Parámetros");
+        for (i = 0; i < func_n; i++)
+            printf("  %-20s %d\n", funcs[i].name, funcs[i].param_count);
+    }
+    printf("\n=== Tabla de Símbolos Globales ===\n");
+    if (sym_n == 0) printf("  (ninguna)\n");
+    else {
+        printf("  %-20s %s\n", "Nombre", "Tipo");
+        for (i = 0; i < sym_n; i++)
+            printf("  %-20s %s\n", syms[i].name, syms[i].type);
+    }
+    printf("\n");
 }
 
-/* 7.2 — Detectar variables declaradas pero no usadas */
-static void sym_check_unused(void) {
-    int i, found = 0;
-    for (i = 0; i < sym_count; i++) {
-        if (!sym_table[i].used) {
-            if (!found) {
-                printf("\n=== Advertencia: variables declaradas pero no usadas ===\n");
-                found = 1;
-            }
-            printf("  - %s (%s)\n", sym_table[i].name, sym_table[i].type);
-        }
-    }
-    if (found)
-        printf("======================================================\n");
-}
+/* Parámetros acumulados de la función en declaración */
+static char func_params[32][64];
+static int  func_param_n = 0;
 %}
 
-/* ---- Tipos de valor semántico ---- */
+/* ---- Tipo semántico ---- */
 %union {
     int   ival;
     float fval;
     char *sval;
 }
 
-/* ---- Tokens con valor ---- */
 %token <sval> ID
 %token <ival> INT_NUM
 %token <fval> FLOAT_NUM
 
-/* ---- Tokens simples (palabras clave y operadores) ---- */
-%token PROGRAM BEGIN_KW END_KW
-%token VAR INT_TYPE FLOAT_TYPE
-%token IF PRINT READ
+%token DEFINE FUNC RETURN IF
+%token INT_TYPE FLOAT_TYPE
 %token PLUS MINUS MULT DIV
 %token GT LT GE LE EQ NE
-%token ASSIGN SEMICOLON LPAREN RPAREN
+%token ASSIGN SEMICOLON COMMA
+%token LPAREN RPAREN LBRACE RBRACE
 
-/* ---- Precedencia y asociatividad (6.1) ---- */
+/* Precedencia y asociatividad (6.1) — de menor a mayor */
+%left GT LT GE LE EQ NE
 %left PLUS MINUS
 %left MULT DIV
 
@@ -129,15 +211,79 @@ static void sym_check_unused(void) {
 %%
 
 program
-    : PROGRAM ID BEGIN_KW stmts END_KW {
-        printf("\nAnálisis completado exitosamente.\n");
-        printf("Total de líneas procesadas: %d\n", line_count);
-        sym_print();
-        sym_check_unused();
+    : top_decls {
+        printf("Análisis completado. Líneas procesadas: %d\n", line_count);
+        print_tables();
+      }
+    ;
+
+top_decls
+    : top_decls top_decl
+    | /* vacío */
+    ;
+
+top_decl
+    /* Macro: #define NOMBRE VALOR */
+    : DEFINE ID INT_NUM {
+        macro_add($2, $3);
         free($2);
       }
-    | error {
-        fprintf(stderr, "Error sintáctico: estructura del programa inválida\n");
+
+    /* Variable global entera */
+    | INT_TYPE ID SEMICOLON {
+        sym_add($2, "int", 0);
+        free($2);
+      }
+
+    /* Variable global flotante */
+    | FLOAT_TYPE ID SEMICOLON {
+        sym_add($2, "float", 0);
+        free($2);
+      }
+
+    /* Declaración de función (6.2) */
+    | func_header LBRACE stmts RBRACE {
+        scope_exit();
+      }
+    ;
+
+/*
+ * func_header: procesa el encabezado de la función,
+ * registra en la tabla de funciones y entra al ámbito.
+ */
+func_header
+    : FUNC ID LPAREN { func_param_n = 0; } param_list RPAREN {
+        if (func_lookup($2) >= 0) {
+            /* 7.2 — redeclaración de función */
+            fprintf(stderr,
+                "Error semántico: variable '%s' ya declarada\n", $2);
+        } else {
+            func_add($2, func_param_n);
+        }
+        /* Entrar al ámbito de la función */
+        cur_scope++;
+        {
+            int i;
+            for (i = 0; i < func_param_n; i++)
+                sym_add(func_params[i], "param", 1);
+        }
+        free($2);
+      }
+    ;
+
+param_list
+    : params
+    | /* vacío */
+    ;
+
+params
+    : ID {
+        strncpy(func_params[func_param_n++], $1, 63);
+        free($1);
+      }
+    | params COMMA ID {
+        strncpy(func_params[func_param_n++], $3, 63);
+        free($3);
       }
     ;
 
@@ -147,92 +293,84 @@ stmts
     ;
 
 stmt
-    /* Declaración de variable entera */
-    : VAR INT_TYPE ID SEMICOLON {
-        sym_add($3, "int");
-        free($3);
+    /* Declaración de variable local entera */
+    : INT_TYPE ID SEMICOLON {
+        sym_add($2, "int", 0);
+        free($2);
       }
 
-    /* Declaración de variable flotante */
-    | VAR FLOAT_TYPE ID SEMICOLON {
-        sym_add($3, "float");
-        free($3);
+    /* Declaración de variable local flotante */
+    | FLOAT_TYPE ID SEMICOLON {
+        sym_add($2, "float", 0);
+        free($2);
       }
 
-    /* Asignación con expresión aritmética (6.1) */
+    /* Asignación */
     | ID ASSIGN expr SEMICOLON {
         if (sym_lookup($1) < 0)
             fprintf(stderr,
-                "Error semántico (línea %d): variable '%s' no fue declarada\n",
-                line_count, $1);
+                "Error semántico: variable '%s' no declarada\n", $1);
         else
             sym_mark_used($1);
         free($1);
       }
 
-    /* Sentencia if simple (6.2) */
-    | IF LPAREN condition RPAREN stmt {
-        /* la verificación de variables se realiza en las reglas de condition/expr */
-      }
-
-    /* Sentencia print */
-    | PRINT LPAREN expr RPAREN SEMICOLON
-
-    /* Sentencia read */
-    | READ LPAREN ID RPAREN SEMICOLON {
-        if (sym_lookup($3) < 0)
+    /* Llamada a función como sentencia */
+    | ID LPAREN { arg_count = 0; } arg_list RPAREN SEMICOLON {
+        int idx = func_lookup($1);
+        if (idx < 0) {
             fprintf(stderr,
-                "Error semántico (línea %d): variable '%s' no fue declarada\n",
-                line_count, $3);
-        else
-            sym_mark_used($3);
-        free($3);
+                "Error semántico: función '%s' no declarada\n", $1);
+        } else if (funcs[idx].param_count != arg_count) {
+            fprintf(stderr,
+                "Error semántico: función '%s' espera %d argumento(s), pero recibió %d\n",
+                $1, funcs[idx].param_count, arg_count);
+        }
+        free($1);
       }
 
-    /* Recuperación de error (6.3) */
+    /* Sentencia if simple con bloque (6.2) */
+    | IF LPAREN { in_condition = 1; } expr { in_condition = 0; } RPAREN
+      LBRACE { cur_scope++; } stmts RBRACE { scope_exit(); }
+
+    /* Sentencia return */
+    | RETURN expr SEMICOLON
+
+    /* Recuperación de error sintáctico (6.3) */
     | error SEMICOLON {
         fprintf(stderr,
-            "Error sintáctico (línea %d): sentencia inválida — se omite hasta ';'\n",
-            line_count);
+            "Error sintáctico (línea %d): sentencia inválida\n", line_count);
         yyerrok;
       }
     ;
 
-/* 7.3 — Condición del if: verifica que las variables estén declaradas */
-condition
-    : expr GT   expr
-    | expr LT   expr
-    | expr GE   expr
-    | expr LE   expr
-    | expr EQ   expr
-    | expr NE   expr
+arg_list
+    : args
+    | /* vacío */
     ;
 
-/* Expresiones aritméticas (6.1) — gramática no ambigua */
+args
+    : expr               { arg_count = 1; }
+    | args COMMA expr    { arg_count++; }
+    ;
+
+/* 6.1 — Expresiones aritméticas y relacionales con precedencia */
 expr
-    : expr PLUS  term
-    | expr MINUS term
-    | term
-    ;
-
-term
-    : term MULT  factor
-    | term DIV   factor
-    | factor
-    ;
-
-factor
-    : INT_NUM
-    | FLOAT_NUM
+    : expr PLUS  expr
+    | expr MINUS expr
+    | expr MULT  expr
+    | expr DIV   expr
+    | expr GT    expr
+    | expr LT    expr
+    | expr GE    expr
+    | expr LE    expr
+    | expr EQ    expr
+    | expr NE    expr
     | LPAREN expr RPAREN
+    | INT_NUM
+    | FLOAT_NUM
     | ID {
-        /* 7.3 — verifica que la variable usada en cualquier expresión (incluyendo if) esté declarada */
-        if (sym_lookup($1) < 0)
-            fprintf(stderr,
-                "Error semántico (línea %d): variable '%s' no fue declarada\n",
-                line_count, $1);
-        else
-            sym_mark_used($1);
+        check_var($1);   /* 7.3 — verifica que la variable esté declarada */
         free($1);
       }
     ;
@@ -251,7 +389,7 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     } else {
-        printf("Ingresa el código fuente (Ctrl+D / Ctrl+Z para terminar):\n");
+        printf("Ingresa el código fuente (Ctrl+D para terminar):\n");
         yyin = stdin;
     }
 
