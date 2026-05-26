@@ -1,0 +1,31 @@
+// Código de prueba correcto — hands-on5
+// Este programa muestra todas las características del compilador
+
+program ejemplo
+begin
+    // Declaraciones de variables
+    var int x;
+    var int y;
+    var int resultado;
+    var float pi;
+
+    // Asignaciones con expresiones aritméticas (mejora 6.1)
+    x = 10;
+    y = 3;
+    resultado = x + y * 2;   // precedencia: primero * luego +
+    pi = 3.14;
+
+    // Sentencia if simple (mejora 6.2)
+    if (resultado > 10)
+        print(resultado);
+
+    if (x == 10)
+        print(x);
+
+    // Leer una variable
+    read(y);
+
+    // Expresión con paréntesis
+    resultado = (x + y) * 2;
+    print(resultado);
+end

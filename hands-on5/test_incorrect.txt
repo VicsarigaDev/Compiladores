@@ -1,0 +1,26 @@
+// Código de prueba incorrecto — hands-on5
+// Este programa contiene errores léxicos, sintácticos y semánticos intencionales
+
+program errores
+begin
+    var int a;
+    var int b;        // b se declara pero NUNCA se usa (error semántico 7.2)
+    var float c;
+
+    // Error semántico: variable 'z' no declarada (7.3 - en expresión)
+    a = z + 5;
+
+    // Error semántico: variable 'd' no declarada en condición if (mejora 7.3)
+    if (d > 0)
+        print(a);
+
+    // Error semántico: re-declaración de variable 'a'
+    var int a;
+
+    // Uso correcto de 'c' para que no quede como no usada
+    c = 1.5;
+    print(c);
+
+    // Error sintáctico: falta el punto y coma  (se recupera)
+    a = 10
+end
